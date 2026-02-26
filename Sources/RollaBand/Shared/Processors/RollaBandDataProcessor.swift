@@ -302,10 +302,11 @@ extension RollaBandDataProcessor {
         maxPacketsPerPage: Int,
         timeout: TimeInterval
     ) async throws -> String {
+        let dataTypeName = String(format: "0x%02X", expectedIdentifier)
         
         while deviceSyncInProgress.contains(deviceUUID) {
             logger.progress(
-                "Raw log extraction waiting for existing sync operation to complete on device: \(deviceUUID.value)",
+                "\(dataTypeName) waiting for existing sync operation to complete on device: \(deviceUUID.value)",
                 category: .healthDataSync
             )
             try await Task.sleep(nanoseconds: 100_000_000)
@@ -315,25 +316,6 @@ extension RollaBandDataProcessor {
         defer {
             deviceSyncInProgress.remove(deviceUUID)
         }
-        
-        return try await performRawDataExtraction(
-            deviceUUID: deviceUUID,
-            command: command,
-            expectedIdentifier: expectedIdentifier,
-            entrySize: entrySize,
-            maxPacketsPerPage: maxPacketsPerPage,
-            timeout: timeout
-        )
-    }
-    
-    private func performRawDataExtraction<Command: RollaBandDataCommand>(
-        deviceUUID: BLEDeviceIdentifier,
-        command: Command.Type,
-        expectedIdentifier: UInt8,
-        entrySize: Int,
-        maxPacketsPerPage: Int,
-        timeout: TimeInterval
-    ) async throws -> String {
         
         let (stream, streamId) = await characteristicObserver.observeNotifications(
             deviceID: deviceUUID,
@@ -358,7 +340,7 @@ extension RollaBandDataProcessor {
                 )
                 _ = try await cmd.execute(using: commandExecutor)
                 
-                let (blockLines, hasMoreData, entriesReceived) = try await readRawDataBlocks(
+                let (blockLines, hasMoreData, entriesReceived) = try await readOneRawPage(
                     stream: stream,
                     expectedIdentifier: expectedIdentifier,
                     entrySize: entrySize,
@@ -369,19 +351,18 @@ extension RollaBandDataProcessor {
                 allBlockLines.append(contentsOf: blockLines)
                 
                 if !hasMoreData {
-                    logger.info("[RawLog] PAGE \(pageNumber): No more data, extraction complete (\(entriesReceived) entries this page)", category: .healthDataSync)
+                    logger.info("[\(dataTypeName)] PAGE \(pageNumber): No more data, sync complete (\(entriesReceived) entries)", category: .healthDataSync)
                     keepPaging = false
                 } else {
-                    logger.info("[RawLog] PAGE \(pageNumber): More data available (\(entriesReceived) entries), continuing to next page...", category: .healthDataSync)
+                    logger.info("[\(dataTypeName)] PAGE \(pageNumber): More data available (\(entriesReceived) entries), continuing to next page...", category: .healthDataSync)
                     keepPaging = true
                     commandType = .continueReading
                 }
             }
             
-            logger.info("[RawLog] EXTRACTION COMPLETE: \(allBlockLines.count) total entries across \(pageNumber) pages", category: .healthDataSync)
-            
+            logger.info("[\(dataTypeName)] SYNC COMPLETE: \(allBlockLines.count) total entries across \(pageNumber) pages", category: .healthDataSync)
         } catch {
-            logger.error("[RawLog] Closing stream due to error: \(error)", category: .healthDataSync)
+            logger.error("[\(dataTypeName)] Closing stream id=\(streamId) due to error: \(error)", category: .healthDataSync)
             await characteristicObserver.stopObservingNotifications(id: streamId)
             throw error
         }
@@ -391,7 +372,145 @@ extension RollaBandDataProcessor {
         return allBlockLines.joined(separator: "\n")
     }
     
-    private func readRawDataBlocks(
+    func getRawDataAsHexString(
+        deviceUUID: BLEDeviceIdentifier,
+        commandByte: UInt8,
+        expectedIdentifier: UInt8,
+        entrySize: Int,
+        maxPacketsPerPage: Int,
+        timeout: TimeInterval
+    ) async throws -> String {
+        let dataTypeName = String(format: "0x%02X", expectedIdentifier)
+        
+        while deviceSyncInProgress.contains(deviceUUID) {
+            logger.progress(
+                "\(dataTypeName) waiting for existing sync operation to complete on device: \(deviceUUID.value)",
+                category: .healthDataSync
+            )
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        deviceSyncInProgress.insert(deviceUUID)
+        
+        defer {
+            deviceSyncInProgress.remove(deviceUUID)
+        }
+        
+        let (stream, streamId) = await characteristicObserver.observeNotifications(
+            deviceID: deviceUUID,
+            serviceUUID: BLEServiceType.rollaBand.uuid,
+            characteristicUUID: BLECharacteristicType.rollaBandNotification.uuid
+        )
+        
+        var allBlockLines: [String] = []
+        var commandType: CustomCommandType = .readRecent
+        var keepPaging = true
+        var pageNumber = 0
+        
+        do {
+            while keepPaging {
+                pageNumber += 1
+                
+                let cmd = GetCustomDataCommand(
+                    deviceUUID: deviceUUID,
+                    timeout: timeout,
+                    commandByte: commandByte,
+                    commandType: commandType
+                )
+                try await cmd.execute(using: commandExecutor)
+                
+                let (blockLines, hasMoreData, entriesReceived) = try await readOneRawPage(
+                    stream: stream,
+                    expectedIdentifier: expectedIdentifier,
+                    entrySize: entrySize,
+                    maxEntriesPerPage: maxPacketsPerPage,
+                    blockTimeoutSeconds: RollaBandDataConstants.defaultBlockTimeout
+                )
+                
+                allBlockLines.append(contentsOf: blockLines)
+                
+                if !hasMoreData {
+                    logger.info("[\(dataTypeName)] PAGE \(pageNumber): No more data, sync complete (\(entriesReceived) entries)", category: .healthDataSync)
+                    keepPaging = false
+                } else {
+                    logger.info("[\(dataTypeName)] PAGE \(pageNumber): More data available (\(entriesReceived) entries), continuing to next page...", category: .healthDataSync)
+                    keepPaging = true
+                    commandType = .continueReading
+                }
+            }
+            
+            logger.info("[\(dataTypeName)] SYNC COMPLETE: \(allBlockLines.count) total entries across \(pageNumber) pages", category: .healthDataSync)
+        } catch {
+            logger.error("[\(dataTypeName)] Closing stream id=\(streamId) due to error: \(error)", category: .healthDataSync)
+            await characteristicObserver.stopObservingNotifications(id: streamId)
+            throw error
+        }
+        
+        await characteristicObserver.stopObservingNotifications(id: streamId)
+        
+        return allBlockLines.joined(separator: "\n")
+    }
+
+    func getSingleReadAsHexString(
+        deviceUUID: BLEDeviceIdentifier,
+        commandByte: UInt8,
+        timeout: TimeInterval
+    ) async throws -> String {
+        let dataTypeName = String(format: "0x%02X", commandByte)
+
+        while deviceSyncInProgress.contains(deviceUUID) {
+            logger.progress(
+                "\(dataTypeName) waiting for existing sync operation to complete on device: \(deviceUUID.value)",
+                category: .healthDataSync
+            )
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        deviceSyncInProgress.insert(deviceUUID)
+
+        defer {
+            deviceSyncInProgress.remove(deviceUUID)
+        }
+
+        let (stream, streamId) = await characteristicObserver.observeNotifications(
+            deviceID: deviceUUID,
+            serviceUUID: BLEServiceType.rollaBand.uuid,
+            characteristicUUID: BLECharacteristicType.rollaBandNotification.uuid
+        )
+
+        do {
+            let cmd = GetCustomDataCommand(
+                deviceUUID: deviceUUID,
+                timeout: timeout,
+                commandByte: commandByte,
+                commandType: .readRecent
+            )
+            try await cmd.execute(using: commandExecutor)
+
+            let matcher = DataIdentifierMatcher(expectedIdentifier: commandByte)
+            let result = await readNextBlock(
+                from: stream,
+                matcher: matcher,
+                timeout: RollaBandDataConstants.defaultBlockTimeout
+            )
+
+            await characteristicObserver.stopObservingNotifications(id: streamId)
+
+            switch result {
+            case .data(let data):
+                let bytes = [UInt8](data)
+                logger.info("[\(dataTypeName)] Single read received \(bytes.count) bytes", category: .healthDataSync)
+                return bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+            case .timeout:
+                logger.warning("[\(dataTypeName)] Single read timed out", category: .healthDataSync)
+                return "NO DATA"
+            }
+        } catch {
+            logger.error("[\(dataTypeName)] Single read error: \(error)", category: .healthDataSync)
+            await characteristicObserver.stopObservingNotifications(id: streamId)
+            throw error
+        }
+    }
+
+    private func readOneRawPage(
         stream: AsyncStream<Data>,
         expectedIdentifier: UInt8,
         entrySize: Int,
@@ -401,9 +520,10 @@ extension RollaBandDataProcessor {
         
         var blockLines: [String] = []
         var totalEntriesReceived = 0
+        var totalBlocksReceived = 0
+        var hasMoreData = true
         var consecutiveTimeouts = 0
         let maxConsecutiveTimeouts = 2
-        var hasMoreData = true
         let endMarker: UInt8 = RollaBandDataConstants.endMarker
         
         let matcher = DataIdentifierMatcher(expectedIdentifier: expectedIdentifier)
@@ -419,59 +539,51 @@ extension RollaBandDataProcessor {
             switch result {
             case .timeout:
                 consecutiveTimeouts += 1
+                
                 if consecutiveTimeouts >= maxConsecutiveTimeouts {
                     if !blockLines.isEmpty {
-                        hasMoreData = totalEntriesReceived >= maxEntriesPerPage
+                        if totalEntriesReceived >= maxEntriesPerPage {
+                            hasMoreData = true
+                        } else {
+                            hasMoreData = false
+                        }
                     } else {
-                        logger.info("[RawLog] [\(dataTypeName)] Max timeouts reached with no data - device has no data to send", category: .healthDataSync)
+                        logger.info("[readOneRawPage] [\(dataTypeName)] Max timeouts reached with no data - device has no data to send", category: .healthDataSync)
                         hasMoreData = false
                     }
                     break pageLoop
                 }
+                
                 continue pageLoop
                 
             case .data(let data):
                 consecutiveTimeouts = 0
+                totalBlocksReceived += 1
                 let bytes = [UInt8](data)
                 
-                let hasEndMarker = detectEndMarkerInBlock(
-                    bytes: bytes,
-                    expectedIdentifier: expectedIdentifier,
-                    endMarker: endMarker
-                )
+                // CONDITION 1: End marker (0xFF)
+                let hasEndMarker = bytes.last == endMarker
                 
-                // Split block into packets based on entry size
-                let packets = divideBlockIntoPackets(
-                    data: bytes,
-                    header: expectedIdentifier,
-                    packetSize: entrySize
-                )
+                // Split block into packets by entry size
+                let packets = divideBlockIntoPackets(data: bytes, header: expectedIdentifier, packetSize: entrySize)
                 
-                // Format each packet and join them together for this block
-                var blockPackets: [String] = []
                 for packet in packets {
-                    let formattedPacket = formatPacket(bytes: packet)
-                    blockPackets.append(formattedPacket)
-                }
-                
-                if !blockPackets.isEmpty {
-                    blockLines.append(blockPackets.joined(separator: " "))
+                    blockLines.append(formatPacket(bytes: packet))
                 }
                 
                 totalEntriesReceived += packets.count
                 
-                // End marker found in this block - no more data
                 if hasEndMarker {
                     let endMarkerLine = String(format: "%02X FF", expectedIdentifier)
                     blockLines.append(endMarkerLine)
-                    logger.info("[RawLog] [\(dataTypeName)] END MARKER with \(packets.count) entries - total received: \(totalEntriesReceived)", category: .healthDataSync)
+                    logger.info("[readOneRawPage] [\(dataTypeName)] END MARKER - total received: \(totalEntriesReceived)", category: .healthDataSync)
                     hasMoreData = false
                     break pageLoop
                 }
                 
                 // CONDITION 2: page is full
                 if totalEntriesReceived >= maxEntriesPerPage {
-                    logger.info("[RawLog] [\(dataTypeName)] MAX ENTRIES RECEIVED (\(totalEntriesReceived)), hasMoreData=true", category: .healthDataSync)
+                    logger.info("[readOneRawPage] [\(dataTypeName)] MAX ENTRIES RECEIVED (\(totalEntriesReceived)), hasMoreData=true", category: .healthDataSync)
                     hasMoreData = true
                     break pageLoop
                 }
@@ -479,22 +591,6 @@ extension RollaBandDataProcessor {
         }
         
         return (blockLines, hasMoreData, totalEntriesReceived)
-    }
-    
-    private func detectEndMarkerInBlock(bytes: [UInt8], expectedIdentifier: UInt8, endMarker: UInt8) -> Bool {
-        guard !bytes.isEmpty else { return false }
-        
-        if bytes.last == endMarker {
-            return true
-        }
-        
-        if bytes.count >= 2 &&
-            bytes[bytes.count - 2] == expectedIdentifier &&
-            bytes.last == endMarker {
-            return true
-        }
-        
-        return false
     }
     
     private func divideBlockIntoPackets(data: [UInt8], header: UInt8, packetSize: Int) -> [[UInt8]] {
@@ -519,7 +615,14 @@ extension RollaBandDataProcessor {
     }
     
     private func formatPacket(bytes: [UInt8]) -> String {
-        bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+        bytes.enumerated().map { index, byte in
+            if index >= 3 && index <= 8 {
+                let decoded = Int((byte >> 4) & 0x0F) * 10 + Int(byte & 0x0F)
+                return String(format: "%02d", decoded)
+            } else {
+                return String(format: "%02X", byte)
+            }
+        }.joined(separator: " ")
     }
 }
 

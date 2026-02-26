@@ -122,6 +122,10 @@ final class RollaBandDependenciesFactory {
             deviceManager: deviceManager,
             logger: logger
         )
+
+        let activityRestoreUseCase = DefaultActivityRestoreUseCase(
+            workoutManager: workoutManager
+        )
         
         // Observation managers
         let heartRateObservationManager = ObservationSessionsManager<HeartRateData>(
@@ -279,7 +283,9 @@ final class RollaBandDependenciesFactory {
             getDeviceBatteryUseCase: batteryUseCase,
             getUserInfoUseCase: getUserInfoUseCase,
             setUserInfoUseCase: setUserInfoUseCase,
+            workoutManager: workoutManager,
             workoutSessionUseCase: workoutSessionUseCase,
+            activityRestoreUseCase: activityRestoreUseCase,
             heartRateObservationUseCase: heartRateObservationUseCase,
             rscObservationUseCase: rscObservationUseCase,
             batteryObservationUseCase: batteryObservationUseCase,

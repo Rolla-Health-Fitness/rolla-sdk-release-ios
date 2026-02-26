@@ -14,4 +14,9 @@ public protocol RollaBandWorkoutManaging: Sendable {
     ) async throws -> WorkoutState
 
     func isUserInActivity() async -> Bool
+    func isActivityRestorePending() async -> Bool
+    func setActivityRestorePending(_ pending: Bool) async
+    func markActivityAsActive() async
+    func setPendingRestoreDeviceId(_ identifier: String?) async
+    func getPendingRestoreDeviceId() async -> String?
 }

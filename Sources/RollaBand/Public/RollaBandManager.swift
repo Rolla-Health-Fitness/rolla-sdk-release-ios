@@ -201,8 +201,27 @@ public final class RollaBandManager: Sendable {
         )
     }
 
+    // MARK: - Activity Restore Support
+
+    /// Sets the restore-pending flag. While true, native auto-stop on reconnection is suppressed.
+    public func setActivityRestorePending(_ pending: Bool) async {
+        await dependencies.activityRestoreUseCase.setActivityRestorePending(pending)
+    }
+
+    /// Syncs native state to "in activity" after the user chooses to resume a
+    /// crash-interrupted activity. Does NOT send any BLE command to the band.
+    public func markActivityAsActive() async {
+        await dependencies.activityRestoreUseCase.markActivityAsActive()
+    }
+
+    /// Returns the stored device identifier of the band that reconnected while
+    /// a restore was pending (set by the connection use case). Used for the deferred stop.
+    public func getPendingRestoreDeviceId() async -> String? {
+        await dependencies.activityRestoreUseCase.getPendingRestoreDeviceId()
+    }
+
     // MARK: - Workout
-    
+
     public func startWorkout(
         identifier: String,
         type: RollaBandWorkoutType

@@ -1284,6 +1284,24 @@ protocol RollaBandWorkoutHostApi {
   ///
   /// Returns [RollaBandMotionSyncResponse] with motion data points
   func getMotionData(uuid: String, fromTimestamp: Int64, completion: @escaping (Result<RollaBandMotionSyncResponse, Error>) -> Void)
+  /// Signals to native that an activity restore is pending (or no longer pending).
+  ///
+  /// When [pending] is true, the native layer suppresses its automatic band-activity
+  /// stop that normally fires on reconnection, so the band keeps running until the
+  /// user makes a choice in the ResumeActivityDialog.
+  ///
+  /// When [pending] is false, the native layer executes the deferred stop (used
+  /// for save / discard / no-restorable-activity cases).
+  func setActivityRestorePending(pending: Bool, completion: @escaping (Result<Void, Error>) -> Void)
+  /// Notifies native that the user chose to resume the in-progress activity.
+  ///
+  /// The native layer syncs its internal state to "in activity" and restores
+  /// data streaming (HR + RSC) so the restored session receives live band data
+  /// WITHOUT sending a new start command to the band (the band is already running).
+  ///
+  /// [uuid] - MAC address / UUID of the connected band device
+  /// [type] - The activity type that was in progress
+  func notifyActivityResumedFromRestore(uuid: String, type: BandActivityType, completion: @escaping (Result<Void, Error>) -> Void)
 }
 
 /// Generated setup class from Pigeon to handle messages through the `binaryMessenger`.
@@ -1352,6 +1370,57 @@ class RollaBandWorkoutHostApiSetup {
       }
     } else {
       getMotionDataChannel.setMessageHandler(nil)
+    }
+    /// Signals to native that an activity restore is pending (or no longer pending).
+    ///
+    /// When [pending] is true, the native layer suppresses its automatic band-activity
+    /// stop that normally fires on reconnection, so the band keeps running until the
+    /// user makes a choice in the ResumeActivityDialog.
+    ///
+    /// When [pending] is false, the native layer executes the deferred stop (used
+    /// for save / discard / no-restorable-activity cases).
+    let setActivityRestorePendingChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.rolla_sdk.RollaBandWorkoutHostApi.setActivityRestorePending\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setActivityRestorePendingChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let pendingArg = args[0] as! Bool
+        api.setActivityRestorePending(pending: pendingArg) { result in
+          switch result {
+          case .success:
+            reply(wrapResult(nil))
+          case .failure(let error):
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      setActivityRestorePendingChannel.setMessageHandler(nil)
+    }
+    /// Notifies native that the user chose to resume the in-progress activity.
+    ///
+    /// The native layer syncs its internal state to "in activity" and restores
+    /// data streaming (HR + RSC) so the restored session receives live band data
+    /// WITHOUT sending a new start command to the band (the band is already running).
+    ///
+    /// [uuid] - MAC address / UUID of the connected band device
+    /// [type] - The activity type that was in progress
+    let notifyActivityResumedFromRestoreChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.rolla_sdk.RollaBandWorkoutHostApi.notifyActivityResumedFromRestore\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      notifyActivityResumedFromRestoreChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let uuidArg = args[0] as! String
+        let typeArg = args[1] as! BandActivityType
+        api.notifyActivityResumedFromRestore(uuid: uuidArg, type: typeArg) { result in
+          switch result {
+          case .success:
+            reply(wrapResult(nil))
+          case .failure(let error):
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      notifyActivityResumedFromRestoreChannel.setMessageHandler(nil)
     }
   }
 }

@@ -25,6 +25,13 @@ public final class RollaBandWorkoutManager: RollaBandWorkoutManaging {
 
 private actor ActivityStateTracker {
     private var isInActivity: Bool = false
+    /// True while the Dart layer is showing a crash-recovery dialog. Suppresses the
+    /// automatic stop that fires on reconnection so the band keeps running until the
+    /// user makes a choice.
+    private var restorePending: Bool = false
+    /// The identifier of the band that reconnected while a restore was pending.
+    /// Stored so the deferred stop can find the device when the user chooses save/discard.
+    private var pendingRestoreDeviceId: String?
     
     func setActive(_ active: Bool) {
         isInActivity = active
@@ -33,11 +40,56 @@ private actor ActivityStateTracker {
     func isActive() -> Bool {
         isInActivity
     }
+
+    func setRestorePending(_ pending: Bool) {
+        restorePending = pending
+        if !pending {
+            pendingRestoreDeviceId = nil
+        }
+    }
+
+    func isRestorePending() -> Bool {
+        restorePending
+    }
+
+    func setPendingRestoreDeviceId(_ identifier: String?) {
+        pendingRestoreDeviceId = identifier
+    }
+
+    func getPendingRestoreDeviceId() -> String? {
+        pendingRestoreDeviceId
+    }
 }
 
 extension RollaBandWorkoutManager {
     public func isUserInActivity() async -> Bool {
         await activityStateTracker.isActive()
+    }
+
+    public func isActivityRestorePending() async -> Bool {
+        await activityStateTracker.isRestorePending()
+    }
+
+    public func setActivityRestorePending(_ pending: Bool) async {
+        await activityStateTracker.setRestorePending(pending)
+    }
+
+    /// Syncs native state to "in activity" after the user chooses to resume a
+    /// crash-interrupted activity. Does NOT send any BLE command to the band.
+    public func markActivityAsActive() async {
+        await activityStateTracker.setActive(true)
+        await activityStateTracker.setRestorePending(false)
+    }
+
+    /// Stores the device identifier of the band that connected while a restore was pending.
+    /// Used to execute the deferred stop if the user chooses save/discard.
+    public func setPendingRestoreDeviceId(_ identifier: String?) async {
+        await activityStateTracker.setPendingRestoreDeviceId(identifier)
+    }
+
+    /// Returns the stored device identifier for the pending restore, if any.
+    public func getPendingRestoreDeviceId() async -> String? {
+        await activityStateTracker.getPendingRestoreDeviceId()
     }
     
     public func startWorkout(

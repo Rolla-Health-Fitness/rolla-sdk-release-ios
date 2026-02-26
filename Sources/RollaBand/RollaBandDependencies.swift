@@ -30,7 +30,9 @@ final class RollaBandDependencies: @unchecked Sendable {
     public let setUserInfoUseCase: SetUserInfoUseCase
 
     // MARK: - Workout & Observation Use Cases
+    public let workoutManager: RollaBandWorkoutManaging
     public let workoutSessionUseCase: WorkoutSessionUseCase
+    public let activityRestoreUseCase: ActivityRestoreUseCase
     public let heartRateObservationUseCase: HeartRateObservationUseCase
     public let rscObservationUseCase: RunningSpeedCadenceObservationUseCase
     public let batteryObservationUseCase: BatteryObservationUseCase
@@ -68,7 +70,9 @@ final class RollaBandDependencies: @unchecked Sendable {
         getDeviceBatteryUseCase: GetDeviceBatteryUseCase,
         getUserInfoUseCase: GetUserInfoUseCase,
         setUserInfoUseCase: SetUserInfoUseCase,
+        workoutManager: RollaBandWorkoutManaging,
         workoutSessionUseCase: WorkoutSessionUseCase,
+        activityRestoreUseCase: ActivityRestoreUseCase,
         heartRateObservationUseCase: HeartRateObservationUseCase,
         rscObservationUseCase: RunningSpeedCadenceObservationUseCase,
         batteryObservationUseCase: BatteryObservationUseCase,
@@ -99,7 +103,9 @@ final class RollaBandDependencies: @unchecked Sendable {
         self.getDeviceBatteryUseCase = getDeviceBatteryUseCase
         self.getUserInfoUseCase = getUserInfoUseCase
         self.setUserInfoUseCase = setUserInfoUseCase
+        self.workoutManager = workoutManager
         self.workoutSessionUseCase = workoutSessionUseCase
+        self.activityRestoreUseCase = activityRestoreUseCase
         self.heartRateObservationUseCase = heartRateObservationUseCase
         self.rscObservationUseCase = rscObservationUseCase
         self.batteryObservationUseCase = batteryObservationUseCase

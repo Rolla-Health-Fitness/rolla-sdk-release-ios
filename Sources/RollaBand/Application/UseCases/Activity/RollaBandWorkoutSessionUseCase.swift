@@ -87,34 +87,36 @@ public actor RollaBandWorkoutSessionUseCase: WorkoutSessionUseCase {
             throw BLEConnectionError.deviceNotConnected(deviceUUID)
         }
 
+        let stopType: RollaBandWorkoutType
+
         switch currentState {
         case .inactive:
-            logger.warning("Attempted to stop workout session but none is active", category: .workout)
-            throw WorkoutSessionError.noActiveSession
+            stopType = activityType
 
-        case .active(let macAddress, let activityType, _), .suspended(let macAddress, let activityType, _):
-            do {
-                guard deviceId == macAddress else {
-                    throw WorkoutSessionError.deviceNotFound(deviceId)
-                }
-
-                _ = try await rollaBandWorkoutManager.stopWorkout(
-                    deviceUUID: deviceUUID,
-                    activityType: activityType,
-                    timeout: 15
-                )
-                logger.success("Workout stopped on band", category: .workout)
-
-                currentState = .inactive
-                await workoutSessionStateStreamSource.yield(.inactive)
-
-                logger.success("Workout session stopped successfully", category: .workout)
-
-            } catch {
-                logger.error("Failed to stop workout session: \(error)", category: .workout)
-                await cleanup()
-                throw error
+        case .active(let macAddress, let activeType, _), .suspended(let macAddress, let activeType, _):
+            guard deviceId == macAddress else {
+                throw WorkoutSessionError.deviceNotFound(deviceId)
             }
+            stopType = activeType
+        }
+
+        do {
+            _ = try await rollaBandWorkoutManager.stopWorkout(
+                deviceUUID: deviceUUID,
+                activityType: stopType,
+                timeout: 15
+            )
+            logger.success("Workout stopped on band", category: .workout)
+
+            currentState = .inactive
+            await workoutSessionStateStreamSource.yield(.inactive)
+
+            logger.success("Workout session stopped successfully", category: .workout)
+
+        } catch {
+            logger.error("Failed to stop workout session: \(error)", category: .workout)
+            await cleanup()
+            throw error
         }
     }
 

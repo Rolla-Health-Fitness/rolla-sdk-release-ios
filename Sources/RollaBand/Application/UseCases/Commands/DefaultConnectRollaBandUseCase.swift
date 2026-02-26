@@ -78,7 +78,11 @@ public final class DefaultConnectRollaBandUseCase: ConnectRollaBandUseCase {
         )
         
         let isInActivity = await workoutManager.isUserInActivity()
-        if !isInActivity {
+        let isRestorePending = await workoutManager.isActivityRestorePending()
+
+        // Suppress the automatic stop when a crash-recovery dialog is pending so the
+        // band keeps running until the user makes a choice (resume / save / discard).
+        if !isInActivity && !isRestorePending {
             let _ = try? await rollaBandCommandExecutor.execute(
                 ActivityControlCommand(
                     deviceUUID: finalDeviceUUID,
@@ -88,15 +92,24 @@ public final class DefaultConnectRollaBandUseCase: ConnectRollaBandUseCase {
                     fireAndForget: true
                 )
             )
+        } else if isRestorePending {
+            // Store the reconnected device ID so the deferred stop can find it
+            // when the user chooses save/discard in the ResumeActivityDialog.
+            if let mac = await deviceIdentityManager.getMAC(for: finalDeviceUUID.value) {
+                await workoutManager.setPendingRestoreDeviceId(mac)
+            }
         }
         
-        try? await rollaBandCommandExecutor.execute(
-            SetStepCountThresholdCommand(
-                deviceUUID: finalDeviceUUID,
-                timeout: 5,
-                thresholdType: .stop
+        // Similarly skip the "outside activity" step threshold when restore is pending.
+        if !isRestorePending {
+            try? await rollaBandCommandExecutor.execute(
+                SetStepCountThresholdCommand(
+                    deviceUUID: finalDeviceUUID,
+                    timeout: 5,
+                    thresholdType: .stop
+                )
             )
-        )
+        }
         
         logger.success("Successfully connected to RollaBand device: \(identifier)", category: logCategory)
     }

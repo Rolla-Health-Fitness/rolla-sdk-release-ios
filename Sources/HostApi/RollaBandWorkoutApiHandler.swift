@@ -67,6 +67,42 @@ extension RollaBandWorkoutApiHandler: RollaBandWorkoutHostApi {
         }
     }
 
+    nonisolated func setActivityRestorePending(pending: Bool, completion: @escaping (Result<Void, Error>) -> Void) {
+        Task {
+            if !pending {
+                // Read the device ID BEFORE clearing the flag, because setActivityRestorePending(false)
+                // wipes pendingRestoreDeviceId as a side effect inside ActivityStateTracker.
+                let deviceId = await self.rollaBandManager.getPendingRestoreDeviceId()
+
+                await self.rollaBandManager.setActivityRestorePending(pending)
+
+                // User chose save/discard (or no activity was found). Execute the
+                // deferred stop so the band exits activity mode now.
+                if let deviceId {
+                    try? await self.rollaBandManager.stopWorkout(identifier: deviceId, type: .run)
+                }
+            } else {
+                await self.rollaBandManager.setActivityRestorePending(pending)
+            }
+
+            await MainActor.run { completion(.success(())) }
+        }
+    }
+
+    nonisolated func notifyActivityResumedFromRestore(uuid: String, type: BandActivityType, completion: @escaping (Result<Void, Error>) -> Void) {
+        Task {
+            // Sync native state to "in activity" without sending a start command.
+            await self.rollaBandManager.markActivityAsActive()
+
+            // Restore data streaming (HR + RSC) so the session receives live band data.
+            // On iOS streaming is only active after startWorkout; this brings it back.
+            await self.setCurrentStreamingDeviceIdentifier(from: uuid)
+            await self.startDataStreaming(deviceId: uuid)
+
+            await MainActor.run { completion(.success(())) }
+        }
+    }
+
     nonisolated func getMotionData(
         uuid: String,
         fromTimestamp: Int64,
