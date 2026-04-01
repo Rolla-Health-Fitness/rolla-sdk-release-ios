@@ -30,6 +30,10 @@ final class LiveWorkoutBridge: NSObject {
     /// This allows quick lookup without scanning all system activities
     private var activitiesById: [String: Activity<LiveWorkoutAttributes>] = [:]
 
+    /// How far in the future to set the stale date on each start/update.
+    /// After this interval with no updates, iOS marks the Live Activity as stale.
+    private static let staleDateInterval: TimeInterval = 2 * 60
+
     // MARK: - Initialization
 
     /// Initialize the Live Workout bridge
@@ -46,7 +50,21 @@ final class LiveWorkoutBridge: NSObject {
             self?.handleMethodCall(call, result: result)
         }
 
-        print("✅ [LiveWorkoutBridge] Registered - Live Activities ready (iOS 16.1+)")
+        endAllStaleActivities()
+    }
+
+    /// End any Live Activities orphaned by a previous crash or force-quit.
+    /// Called automatically on init so stale widgets are dismissed as soon as
+    /// the app relaunches.
+    private func endAllStaleActivities() {
+        let runningActivities = Activity<LiveWorkoutAttributes>.activities
+        guard !runningActivities.isEmpty else { return }
+
+        for activity in runningActivities {
+            Task {
+                await activity.end(dismissalPolicy: .immediate)
+            }
+        }
     }
 
     // MARK: - Method Call Handling
@@ -63,6 +81,8 @@ final class LiveWorkoutBridge: NSObject {
             handleUpdate(call, result: result)
         case "end":
             handleEnd(call, result: result)
+        case "endAll":
+            handleEndAll(result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -90,13 +110,11 @@ final class LiveWorkoutBridge: NSObject {
     private func handleStart(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         // Check if Live Activities are enabled by the user
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-            print("⚠️ [LiveWorkoutBridge] Live Activities disabled by user")
             result(nil)
             return
         }
 
         guard let args = call.arguments as? [String: Any] else {
-            print("❌ [LiveWorkoutBridge] Invalid arguments for start")
             result(nil)
             return
         }
@@ -104,7 +122,6 @@ final class LiveWorkoutBridge: NSObject {
         // Extract required parameters
         guard let activityId = args["activityId"] as? String,
               let name = args["name"] as? String else {
-            print("❌ [LiveWorkoutBridge] Missing required parameters (activityId or name)")
             result(nil)
             return
         }
@@ -126,6 +143,7 @@ final class LiveWorkoutBridge: NSObject {
         let isBandConnected = args["isBandConnected"] as? Bool ?? true
         let disconnectedMessage = args["disconnectedMessage"] as? String
         let pausedMessage = args["pausedMessage"] as? String
+        let staleMessage = args["staleMessage"] as? String
         let heartRateBpm = parseOptionalInt(args["heartRateBpm"])
         let maxHeartRateBpm = parseOptionalInt(args["maxHeartRateBpm"])
 
@@ -147,21 +165,33 @@ final class LiveWorkoutBridge: NSObject {
             isPaused: false,
             isBandConnected: isBandConnected,
             disconnectedMessage: disconnectedMessage,
-            pausedMessage: pausedMessage
+            pausedMessage: pausedMessage,
+            staleMessage: staleMessage
         )
 
         // Request the Live Activity from iOS
         do {
-            let activity = try Activity.request(
-                attributes: attributes,
-                contentState: initialState,
-                pushType: nil  // Not using remote push
-            )
+            let activity: Activity<LiveWorkoutAttributes>
+            if #available(iOS 16.2, *) {
+                let content = ActivityContent(
+                    state: initialState,
+                    staleDate: Date().addingTimeInterval(Self.staleDateInterval)
+                )
+                activity = try Activity.request(
+                    attributes: attributes,
+                    content: content,
+                    pushType: nil
+                )
+            } else {
+                activity = try Activity.request(
+                    attributes: attributes,
+                    contentState: initialState,
+                    pushType: nil
+                )
+            }
 
             // Store for later updates
             activitiesById[activityId] = activity
-
-            print("✅ [LiveWorkoutBridge] Started Live Activity: \(activityId) -> \(activity.id)")
             result(activity.id)
         } catch {
             print("❌ [LiveWorkoutBridge] Failed to start Live Activity: \(error)")
@@ -188,13 +218,11 @@ final class LiveWorkoutBridge: NSObject {
     /// - Returns: Bool - true if updated successfully, false otherwise
     private func handleUpdate(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         guard let args = call.arguments as? [String: Any] else {
-            print("❌ [LiveWorkoutBridge] Invalid arguments for update")
             result(false)
             return
         }
 
         guard let activityId = args["activityId"] as? String else {
-            print("❌ [LiveWorkoutBridge] Missing activityId for update")
             result(false)
             return
         }
@@ -211,6 +239,7 @@ final class LiveWorkoutBridge: NSObject {
         let isBandConnected = args["isBandConnected"] as? Bool ?? true
         let disconnectedMessage = args["disconnectedMessage"] as? String
         let pausedMessage = args["pausedMessage"] as? String
+        let staleMessage = args["staleMessage"] as? String
         let heartRateBpm = parseOptionalInt(args["heartRateBpm"])
         let maxHeartRateBpm = parseOptionalInt(args["maxHeartRateBpm"])
 
@@ -219,7 +248,6 @@ final class LiveWorkoutBridge: NSObject {
             ?? Activity<LiveWorkoutAttributes>.activities.first(where: { $0.attributes.activityId == activityId })
 
         guard let activity = activity else {
-            print("⚠️ [LiveWorkoutBridge] Activity not found for update: \(activityId)")
             result(false)
             return
         }
@@ -234,15 +262,23 @@ final class LiveWorkoutBridge: NSObject {
             isPaused: isPaused,
             isBandConnected: isBandConnected,
             disconnectedMessage: disconnectedMessage,
-            pausedMessage: pausedMessage
+            pausedMessage: pausedMessage,
+            staleMessage: staleMessage
         )
 
-        // Update the Live Activity asynchronously
+        // Update the Live Activity asynchronously, pushing the stale date forward
         Task {
-            await activity.update(using: newState)
+            if #available(iOS 16.2, *) {
+                let content = ActivityContent(
+                    state: newState,
+                    staleDate: Date().addingTimeInterval(Self.staleDateInterval)
+                )
+                await activity.update(content)
+            } else {
+                await activity.update(using: newState)
+            }
             // Update cache
             self.activitiesById[activityId] = activity
-            print("🔄 [LiveWorkoutBridge] Updated Live Activity: \(activityId)")
             result(true)
         }
     }
@@ -257,13 +293,11 @@ final class LiveWorkoutBridge: NSObject {
     /// - Returns: Bool - true if ended successfully, false otherwise
     private func handleEnd(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         guard let args = call.arguments as? [String: Any] else {
-            print("❌ [LiveWorkoutBridge] Invalid arguments for end")
             result(false)
             return
         }
 
         guard let activityId = args["activityId"] as? String else {
-            print("❌ [LiveWorkoutBridge] Missing activityId for end")
             result(false)
             return
         }
@@ -273,7 +307,6 @@ final class LiveWorkoutBridge: NSObject {
             ?? Activity<LiveWorkoutAttributes>.activities.first(where: { $0.attributes.activityId == activityId })
 
         guard let activity = activity else {
-            print("⚠️ [LiveWorkoutBridge] Activity not found for end: \(activityId)")
             result(false)
             return
         }
@@ -283,7 +316,29 @@ final class LiveWorkoutBridge: NSObject {
             await activity.end(dismissalPolicy: .immediate)
             // Remove from cache
             self.activitiesById.removeValue(forKey: activityId)
-            print("🔴 [LiveWorkoutBridge] Ended Live Activity: \(activityId)")
+            result(true)
+        }
+    }
+
+    // MARK: - End All Live Activities
+
+    /// End all running Live Activities.
+    /// Called from Flutter via the `endAll` method channel to clean up stale
+    /// activities programmatically (e.g. on app startup before a new workout).
+    ///
+    /// - Returns: Bool - true when complete
+    private func handleEndAll(result: @escaping FlutterResult) {
+        let activities = Activity<LiveWorkoutAttributes>.activities
+        guard !activities.isEmpty else {
+            result(true)
+            return
+        }
+
+        Task {
+            for activity in activities {
+                await activity.end(dismissalPolicy: .immediate)
+            }
+            self.activitiesById.removeAll()
             result(true)
         }
     }
