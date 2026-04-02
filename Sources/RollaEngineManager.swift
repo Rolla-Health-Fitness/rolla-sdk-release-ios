@@ -19,6 +19,8 @@ final class RollaEngineManager {
 
     var onClose: ((String?) -> Void)?
     var onError: ((String, String) -> Void)?
+    var onTokenRefreshed: ((String, String?, TimeInterval?) -> Void)?
+    var onTokenExpired: (() -> Void)?
 
     private init() {}
 
@@ -74,7 +76,19 @@ final class RollaEngineManager {
             let message = args?["message"] as? String ?? "Unknown error"
             onError?(code, message)
             result(nil)
-            
+
+        case "onTokenRefreshed":
+            let token = args?["token"] as? String ?? ""
+            let refreshToken = args?["refreshToken"] as? String
+            let expiresIn = args?["expiresIn"] as? Int
+            let expiresInInterval: TimeInterval? = expiresIn.map { TimeInterval($0) }
+            onTokenRefreshed?(token, refreshToken, expiresInInterval)
+            result(nil)
+
+        case "onTokenExpired":
+            onTokenExpired?()
+            result(nil)
+
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -127,6 +141,31 @@ final class RollaEngineManager {
         }
     }
     
+    func updateToken(token: String, refreshToken: String?, expiresIn: TimeInterval?, completion: @escaping (Result<Void, RollaError>) -> Void) {
+        guard let channel = methodChannel else {
+            completion(.failure(.engineFailedToStart))
+            return
+        }
+
+        var args: [String: Any] = ["token": token]
+        if let refreshToken = refreshToken {
+            args["refreshToken"] = refreshToken
+        }
+        if let expiresIn = expiresIn {
+            args["expiresIn"] = Int(expiresIn)
+        }
+
+        channel.invokeMethod("updateToken", arguments: args) { response in
+            DispatchQueue.main.async {
+                if let error = response as? FlutterError {
+                    completion(.failure(.initializationFailed(error.message ?? "Unknown error")))
+                } else {
+                    completion(.success(()))
+                }
+            }
+        }
+    }
+
     func clearSession(completion: @escaping (Result<Void, RollaError>) -> Void) {
         guard let channel = methodChannel else {
             completion(.failure(.engineFailedToStart))
@@ -148,6 +187,10 @@ final class RollaEngineManager {
         methodChannel?.setMethodCallHandler(nil)
         methodChannel = nil
         appDependencies = nil
+        onClose = nil
+        onError = nil
+        onTokenRefreshed = nil
+        onTokenExpired = nil
         engine?.destroyContext()
         engine = nil
         isReady = false
