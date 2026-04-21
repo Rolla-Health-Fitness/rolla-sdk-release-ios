@@ -34,4 +34,4 @@ CocoaPods requires `ENABLE_USER_SCRIPT_SANDBOXING` set to **No** in your target'
 
 ---
 
-For detailed integration instructions see the [iOS Integration Guide](https://github.com/Rolla-Health-Fitness/rolla-sdk-documentation/tree/main/ios).
+For detailed integration instructions see the [iOS Integration Guide](https://github.com/Rolla-Health-Fitness/rolla-sdk-documentation/tree/dev/ios).
