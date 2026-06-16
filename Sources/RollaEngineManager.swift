@@ -107,7 +107,8 @@ final class RollaEngineManager {
             "isModal": isModal,
             "showBackButton": showBackButton,
             "hideBottomNavigation": true,
-            "showSettingsButton": config.showSettingsButton
+            "showSettingsButton": config.showSettingsButton,
+            "removeRollaBandReferences": config.removeRollaBandReferences
         ]
 
         if let userId = config.userId {
@@ -122,8 +123,8 @@ final class RollaEngineManager {
             args["tokenExpiresIn"] = Int(expiresIn)
         }
 
-        if let modules = config.modules {
-            args["modules"] = modules
+        if !config.disabledModules.isEmpty {
+            args["disabledModules"] = config.disabledModules.map { $0.rawValue }
         }
 
         if let branding = config.branding {

@@ -8,9 +8,10 @@ public struct RollaConfiguration {
     public let userId: String?
     public let partnerId: String
     public let environment: String
-    public let modules: [String]?
+    public let disabledModules: Set<RollaDisabledModule>
     public let branding: RollaBranding?
     public let showSettingsButton: Bool
+    public let removeRollaBandReferences: Bool
 
     public init(
         token: String,
@@ -19,9 +20,10 @@ public struct RollaConfiguration {
         userId: String? = nil,
         partnerId: String,
         environment: String = "rnd",
-        modules: [String]? = nil,
+        disabledModules: Set<RollaDisabledModule> = [],
         branding: RollaBranding? = nil,
-        showSettingsButton: Bool = true
+        showSettingsButton: Bool = true,
+        removeRollaBandReferences: Bool = true
     ) {
         self.token = token
         self.refreshToken = refreshToken
@@ -29,9 +31,10 @@ public struct RollaConfiguration {
         self.userId = userId
         self.partnerId = partnerId
         self.environment = environment
-        self.modules = modules
+        self.disabledModules = disabledModules
         self.branding = branding
         self.showSettingsButton = showSettingsButton
+        self.removeRollaBandReferences = removeRollaBandReferences
     }
 }
 
