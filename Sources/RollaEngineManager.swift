@@ -22,6 +22,21 @@ final class RollaEngineManager {
     var onTokenRefreshed: ((String, String?, TimeInterval?) -> Void)?
     var onTokenExpired: (() -> Void)?
 
+    // Host-event closures. Unlike the presentation callbacks above (wired on
+    // show, cleared on dismiss), these are wired for the engine's lifetime by
+    // Rolla.wireHostEventCallbacks() and cleared only in destroy().
+    var onActivityCompleted: ((RollaCompletedActivity) -> Void)?
+    var onActivityStarted: ((RollaStartedActivity) -> Void)?
+    var onActivityRemoved: ((RollaRemovedActivity) -> Void)?
+    var onUiSyncCompleted: ((RollaSyncResult) -> Void)?
+    var onBandPaired: ((RollaBandInfo) -> Void)?
+    var onBandUnpaired: ((RollaBandInfo) -> Void)?
+    var onBandConnected: ((RollaBandInfo) -> Void)?
+    var onBandDisconnected: ((RollaBandInfo) -> Void)?
+    var onPrimarySourceChanged: ((RollaPrimarySourceChanged) -> Void)?
+    var onGoalsChanged: ((RollaGoalsChanged) -> Void)?
+    var onProfileUpdated: ((RollaProfileUpdated) -> Void)?
+
     private init() {}
 
     func setPresenting(_ value: Bool) {
@@ -89,6 +104,50 @@ final class RollaEngineManager {
             onTokenExpired?()
             result(nil)
 
+        case "onActivityCompleted":
+            onActivityCompleted?(RollaCompletedActivity.from(call.arguments))
+            result(nil)
+
+        case "onActivityStarted":
+            onActivityStarted?(RollaStartedActivity.from(call.arguments))
+            result(nil)
+
+        case "onActivityRemoved":
+            onActivityRemoved?(RollaRemovedActivity.from(call.arguments))
+            result(nil)
+
+        case "onUiSyncCompleted":
+            onUiSyncCompleted?(RollaSyncResult.from(call.arguments))
+            result(nil)
+
+        case "onBandPaired":
+            onBandPaired?(RollaBandInfo.from(call.arguments))
+            result(nil)
+
+        case "onBandUnpaired":
+            onBandUnpaired?(RollaBandInfo.from(call.arguments))
+            result(nil)
+
+        case "onBandConnected":
+            onBandConnected?(RollaBandInfo.from(call.arguments))
+            result(nil)
+
+        case "onBandDisconnected":
+            onBandDisconnected?(RollaBandInfo.from(call.arguments))
+            result(nil)
+
+        case "onPrimarySourceChanged":
+            onPrimarySourceChanged?(RollaPrimarySourceChanged.from(call.arguments))
+            result(nil)
+
+        case "onGoalsChanged":
+            onGoalsChanged?(RollaGoalsChanged.from(call.arguments))
+            result(nil)
+
+        case "onProfileUpdated":
+            onProfileUpdated?(RollaProfileUpdated.from(call.arguments))
+            result(nil)
+
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -107,8 +166,7 @@ final class RollaEngineManager {
             "isModal": isModal,
             "showBackButton": showBackButton,
             "hideBottomNavigation": true,
-            "showSettingsButton": config.showSettingsButton,
-            "removeRollaBandReferences": config.removeRollaBandReferences
+            "showSettingsButton": config.showSettingsButton
         ]
 
         if let userId = config.userId {
@@ -127,8 +185,19 @@ final class RollaEngineManager {
             args["disabledModules"] = config.disabledModules.map { $0.rawValue }
         }
 
+        if !config.disabledDataSources.isEmpty {
+            args["disabledDataSources"] = config.disabledDataSources.map { $0.rawValue }
+        }
+
+        if let language = config.language {
+            args["language"] = language.rawValue
+        }
+
         if let branding = config.branding {
-            args["branding"] = branding.toDictionary()
+            let brandingDict = branding.toDictionary()
+            if !brandingDict.isEmpty {
+                args["branding"] = brandingDict
+            }
         }
 
         channel.invokeMethod("initialize", arguments: args) { response in
@@ -167,6 +236,110 @@ final class RollaEngineManager {
         }
     }
 
+    /// Ensure the Flutter engine is running and the SDK is configured, WITHOUT
+    /// presenting any UI. Backs the headless reads (e.g. battery), letting a host
+    /// call into the SDK before — or without ever — showing the SDK screen.
+    ///
+    /// If the engine is already running this re-issues `configure`. For the same
+    /// user the Dart side treats that as a seamless resume and does not reset.
+    func ensureConfigured(with config: RollaConfiguration, completion: @escaping (Result<Void, RollaError>) -> Void) {
+        if engine == nil {
+            do {
+                try initialize()
+            } catch let error as RollaError {
+                completion(.failure(error))
+                return
+            } catch {
+                completion(.failure(.unknown))
+                return
+            }
+        }
+        // Configure with the same presentation settings show(from:) uses (modal
+        // with the back button on). The back button matters most: for a native
+        // host it is the user's only built-in way out of the SDK and back to the
+        // app. It must be set here too, not just in show(): a headless configure
+        // already mounts RollaSdkHome offscreen and the Dart entry point won't
+        // rebuild it on a later show() (seamless-resume early-returns once
+        // initialized), so the home tree is built once with whatever this first
+        // configure passes — a warm-up-then-show() flow with the button off here
+        // would present without it.
+        configure(with: config, isModal: true, showBackButton: true, completion: completion)
+    }
+
+    /// Read the connected Rolla band's battery level over the method channel.
+    ///
+    /// Resolves to a typed ``RollaBatteryResult``. Every no-band, disconnected,
+    /// timed-out, or Bluetooth-off case comes back as `.success` with a
+    /// non-`.available` status; `.failure` is reserved for transport problems,
+    /// such as the engine not being started.
+    func getBandBatteryLevel(completion: @escaping (Result<RollaBatteryResult, RollaError>) -> Void) {
+        guard let channel = methodChannel else {
+            completion(.failure(.engineFailedToStart))
+            return
+        }
+
+        channel.invokeMethod("getBandBatteryLevel", arguments: nil) { response in
+            DispatchQueue.main.async {
+                if let error = response as? FlutterError {
+                    completion(.failure(.flutterError(code: error.code, message: error.message ?? "Battery read failed")))
+                } else {
+                    completion(.success(RollaBatteryResult.from(response)))
+                }
+            }
+        }
+    }
+
+    /// Query the account's paired band over the method channel.
+    ///
+    /// Resolves to a typed ``RollaPairedBandResult`` with zero Bluetooth
+    /// involvement. Paired, not-paired, and unknown outcomes are all encoded in
+    /// the result; `.failure` is reserved for transport problems, such as the
+    /// engine not being started.
+    func getPairedBandInfo(completion: @escaping (Result<RollaPairedBandResult, RollaError>) -> Void) {
+        guard let channel = methodChannel else {
+            completion(.failure(.engineFailedToStart))
+            return
+        }
+
+        channel.invokeMethod("getPairedBandInfo", arguments: nil) { response in
+            DispatchQueue.main.async {
+                if let error = response as? FlutterError {
+                    completion(.failure(.flutterError(code: error.code, message: error.message ?? "Paired-band query failed")))
+                } else {
+                    completion(.success(RollaPairedBandResult.from(response)))
+                }
+            }
+        }
+    }
+
+    /// Run a headless sync over the method channel.
+    ///
+    /// Resolves to a typed ``RollaSyncResult``. Success, skipped, and failure
+    /// outcomes are all encoded in the result; `.failure` is reserved for
+    /// transport problems, such as the engine not being started.
+    ///
+    /// `includeSamples` is forwarded to Dart so the result's `syncedData` also
+    /// carries the raw sample arrays when requested.
+    func syncHealthData(
+        includeSamples: Bool = false,
+        completion: @escaping (Result<RollaSyncResult, RollaError>) -> Void
+    ) {
+        guard let channel = methodChannel else {
+            completion(.failure(.engineFailedToStart))
+            return
+        }
+
+        channel.invokeMethod("syncHealthData", arguments: ["includeSamples": includeSamples]) { response in
+            DispatchQueue.main.async {
+                if let error = response as? FlutterError {
+                    completion(.failure(.flutterError(code: error.code, message: error.message ?? "Sync failed")))
+                } else {
+                    completion(.success(RollaSyncResult.from(response)))
+                }
+            }
+        }
+    }
+
     func clearSession(completion: @escaping (Result<Void, RollaError>) -> Void) {
         guard let channel = methodChannel else {
             completion(.failure(.engineFailedToStart))
@@ -192,6 +365,17 @@ final class RollaEngineManager {
         onError = nil
         onTokenRefreshed = nil
         onTokenExpired = nil
+        onActivityCompleted = nil
+        onActivityStarted = nil
+        onActivityRemoved = nil
+        onUiSyncCompleted = nil
+        onBandPaired = nil
+        onBandUnpaired = nil
+        onBandConnected = nil
+        onBandDisconnected = nil
+        onPrimarySourceChanged = nil
+        onGoalsChanged = nil
+        onProfileUpdated = nil
         engine?.destroyContext()
         engine = nil
         isReady = false

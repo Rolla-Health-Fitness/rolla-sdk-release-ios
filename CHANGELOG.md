@@ -10,6 +10,60 @@
 
 ---
 
+## 0.1.12
+
+### Both platforms
+
+- **[feature] New headless public SDK methods.** Four new methods that all run **headlessly** — no SDK UI needs to be opened; after initializing the SDK, host apps can call them directly:
+  - **`warmUpEngine()`** — starts and configures the SDK ahead of time without showing any UI, so the first `show()` is instant and the headless reads below work before the SDK has ever been presented. Optional: the methods below already warm up the engine if needed, but this method gives host apps the freedom to warm the engine separately and control the timing.
+  - **`syncHealthData()`** — runs a full sync of the user's primary health data source and returns a typed result: `success` (with whether new data was uploaded, when it started and completed, and a `syncedData` breakdown of what was synced), `skipped` (with a documented reason, e.g. no band paired, the band not reachable, or a missing permission), or `failure`. It never throws, and reports the same result to the `rollaDidCompleteHealthDataSync` delegate method (iOS) / `onSyncHealthDataCompleted` listener method (Android) — named 1:1 after the method so it can't be confused with the UI-sync event. Pass `includeSamples: true` to also get the raw per-sample arrays.
+  - **`getBandBatteryLevel()`** — a live battery read from the connected Rolla band, returning a typed result: a percentage when available, or a documented "unavailable" reason (no band paired, band not reachable, Bluetooth off, permission not granted).
+  - **`getPairedBandInfo()`** — answers "does this account currently have a Rolla band?" with **zero Bluetooth** — no scan, no connect, no BLE permission; works with Bluetooth off. Returns a typed result: `bandPaired` (with the band's MAC address plus the last cached battery/firmware/serial, when available), `noBandPaired` (the user's profile confirms no band), or `unknown` (offline with no local record — reported instead of guessing). The lookup is network-first, so a band unpaired remotely from another device is reported correctly.
+
+  All of these methods can be called without the SDK UI being opened or launched, hence the term "headless". But because headless calls have no UI to prompt from, the host owns OS permissions: when one is missing the methods fail fast with a source-specific reason (`bluetoothPermissionRequired`, `bluetoothUnavailable`, `appleHealthPermissionRequired`, `healthConnectPermissionRequired`) rather than prompting.
+
+- **[feature] Added new module — Leaderboards.** Opt-in competitive rankings compare users on their Health Score or Active Points against others in the tenant over weekly and monthly periods. The profile screen shows a summary card with the user's rank per challenge type; the detail page lists ranked participants centered on the user's position with bidirectional pagination, supports weekly/monthly toggling and browsing up to 6 months of history, and lets users join or leave (with a 7-day rejoin cooldown). The module is wired end-to-end to the backend leaderboard API and can be hidden everywhere in the SDK UI by passing the new `RollaDisabledModule.leaderboards` value in `disabledModules`, alongside the existing `weight` and `bloodPressure` values.
+- **[improvement] Onboarding profile data can be skipped by setting the profile in advance.** Host apps can now call `POST /api/setprofile` (with the user's bearer token and `Partner-ID` header, like the other auth-API endpoints) before first presenting the SDK: when the profile already carries a username, birthdate, gender, height, and weight, the SDK skips its account-details onboarding screen entirely. Weight remains mandatory when the weight module is disabled because calorie calculations depend on it. The completeness rule no longer demands units, country, or language (they default or self-heal), and a partially set profile pre-fills the onboarding form so users only complete the gaps.
+- **[feature] Host-controlled SDK language.** `RollaConfiguration` gains an optional `language`, typed by the new `RollaLanguage` enum listing every language the SDK ships (`english`, `german`, `spanish`, `croatian`, `bosnian`, `serbianLatin`, `serbianCyrillic`, `arabic`). When set, that language is authoritative for the Flutter engine's lifetime: persisted picks and the backend profile cannot override it. Changing the configured language requires destroying and recreating the engine, like other SDK configuration changes. A configured language is also written to the user's backend profile at startup when it differs, so backend-generated content (goal labels, insights) matches the SDK UI language.
+- **[feature] Host event listener: eleven SDK events pushed to the host app.** The existing `RollaDelegate` (iOS) / `RollaListener` (Android) gains eleven methods a host can override to observe what happens inside the SDK, without polling:
+
+  | Event | iOS | Android | Payload |
+  |---|---|---|---|
+  | Activity completed | `rollaDidCompleteActivity` | `onActivityCompleted` | `RollaCompletedActivity` |
+  | UI sync completed | `rollaDidCompleteUISync` | `onUiSyncCompleted` | `RollaSyncResult` |
+  | Band paired | `rollaDidPairBand` | `onBandPaired` | `RollaBandInfo` |
+  | Band unpaired | `rollaDidUnpairBand` | `onBandUnpaired` | `RollaBandInfo` |
+  | Primary source changed | `rollaDidChangePrimarySource` | `onPrimarySourceChanged` | `RollaPrimarySourceChanged` |
+  | Goals changed | `rollaDidChangeGoals` | `onGoalsChanged` | `RollaGoalsChanged` |
+  | Profile updated | `rollaDidUpdateProfile` | `onProfileUpdated` | `RollaProfileUpdated` |
+  | Band connected | `rollaDidConnectBand` | `onBandConnected` | `RollaBandInfo` |
+  | Band disconnected | `rollaDidDisconnectBand` | `onBandDisconnected` | `RollaBandInfo` |
+  | Activity started | `rollaDidStartActivity` | `onActivityStarted` | `RollaStartedActivity` |
+  | Activity removed | `rollaDidRemoveActivity` | `onActivityRemoved` | `RollaRemovedActivity` |
+
+  All methods have default no-op bodies, so existing integrations compile unchanged. Events are delivered for the engine's lifetime — they keep flowing after the SDK UI closes, as long as the engine is alive. Firing semantics and lifecycle guarantees are documented on the delegate/listener methods.
+- **[feature] Hide selected data sources from the SDK UI.** A new `disabledDataSources` option hides specific data-source connect options (Band, Garmin, Oura, Apple Health, Health Connect) wherever a source is offered; omit it or pass an empty set to offer every source (default, no change for existing partners). Already-connected sources stay visible for viewing/disconnecting. When only the Band is left, the picker is skipped and onboarding goes straight to band pairing.
+- **[feature] Added Spanish (Español) language support.**
+- **[feature] Added Serbian language support in both scripts — Cyrillic (ћирилица) and Latin (latinica).**
+- **[feature] Insights Settings page for personalized context.** Added a new Insights Settings screen that lets users provide additional personal context — such as lifestyle details, health goals, and preferences — so AI-generated insights can be more relevant and tailored to the individual.
+- **[breaking] `RollaBranding` reworked to hold exactly the options that affect the SDK.** It now has six fields, all optional: `hostAppName` (names the host app in the consent intro and the permission prompts, in every SDK language), `primaryColor` (seeds the SDK's entire color scheme), `themeMode` (renamed from `defaultThemeMode`, now typed by the new `RollaThemeMode` enum), `headerLogoAsset`, `privacyUrl`, and `removeRollaBandReferences` (moved from `RollaConfiguration`, same semantics). A set field overrides the SDK's built-in default individually and an unset field keeps it — previously, passing any branding replaced all defaults at once, silently dropping e.g. the consent screen's privacy-policy link. The removed options — `appName`, `secondaryColor`, `accentColor`, `brightness`, `defaultLocale`, `termsUrl` — had no effect on the SDK UI.
+- **[improvement] Added clearer guidance for profile metrics and data sources.** Profile details now explain BMI, BMR, and max heart rate with source links, and the Data Sources page clarifies how primary and secondary sources work.
+- **[improvement] Split the combined permission screen into two separate pages for Bluetooth and Location.** Each permission now has its own dedicated page with contextual copy explaining why it is needed, giving users a clearer understanding before granting access.
+- **[fix] Opening the app without an internet connection no longer signs you out or gets stuck on a loading spinner.** Your session is kept and you land on the home screen in offline mode, with data refreshing once you're back online.
+- **[fix] Saving an interrupted activity now keeps the duration shown on the recovery prompt.** The saved activity's summary now matches the time displayed on the Save button instead of showing a different duration.
+- **[fix] Activities with little or no distance no longer show a wrong average pace.** When there isn't enough distance to calculate a meaningful pace, the average pace is now left blank instead of displaying an unrealistic value.
+- **[fix] Bugs and stability fixes.** Various internal fixes and stability improvements.
+
+### Android
+
+- **[improvement] Neutral Android notification channel names.** The two SDK-created Android notification channels that end users see in system settings were renamed from "Rolla Warnings" and "Engagement" to the brand-neutral "Important Alerts" and "Engagement Tips". This keeps the channels consistent with the host app's branding.
+
+### iOS
+
+- **[breaking] `RollaDelegate` error method renamed: `rolla(_:didFailWithError:)` → `rollaDidFailWithError(_:error:)`.** Aligns the one anonymous-form method with the rest of the `rollaDid…` delegate family. Migration is a signature change only — same parameters, same behavior: `func rollaDidFailWithError(_ rolla: Rolla, error: RollaError)`.
+
+---
+
 ## 0.1.11
 
 ### Both platforms
