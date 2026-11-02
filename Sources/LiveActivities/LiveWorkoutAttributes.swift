@@ -22,7 +22,7 @@ struct LiveWorkoutAttributes: ActivityAttributes {
     public struct ContentState: Codable, Hashable {
         var metrics: [Metric]
         /// Determines how the widget should interpret/render `metrics[1]` (e.g. icon choice).
-        /// Expected values: "distance" | "activePoints".
+        /// Expected values: "distance" | "speed" | "activePoints".
         var secondaryMetricKind: String?
         /// Timer base date used for `Text(date, style: .timer)` so the Live Activity timer
         /// matches the in-app dashboard duration (pause-aware elapsed).

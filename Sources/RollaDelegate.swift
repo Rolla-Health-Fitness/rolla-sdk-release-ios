@@ -74,10 +74,11 @@ public protocol RollaDelegate: AnyObject {
     func rollaDidStartActivity(_ rolla: Rolla, activity: RollaStartedActivity)
 
     /// Called when an activity's record is removed without a kept result —
-    /// ``RollaRemovedActivity/reason`` says why: `canceled` (a crash-recovery
-    /// discard of a session that was never saved — the commonly expected
-    /// "activity canceled" case) or `deleted` (the user deleted a saved
-    /// activity from the review screen, backend-confirmed).
+    /// ``RollaRemovedActivity/reason`` says why: `canceled` (a session that was
+    /// never saved — discarded from the dashboard on stop or from the
+    /// crash-recovery prompt; the commonly expected "activity canceled" case)
+    /// or `deleted` (the user deleted a saved activity from the review screen,
+    /// backend-confirmed).
     ///
     /// - Parameters:
     ///   - rolla: The Rolla instance delivering the event.
@@ -91,14 +92,19 @@ public protocol RollaDelegate: AnyObject {
     /// Distinct from ``rollaDidCompleteHealthDataSync(_:result:)``, which fires only for
     /// host-initiated headless ``Rolla/syncHealthData(includeSamples:completion:)``
     /// calls — the payload type is shared so a host reads one result shape for
-    /// both directions. On a successful band / Apple Health / Health Connect
-    /// UI sync, ``RollaSyncResult/syncedData`` carries the same per-stream
-    /// summary breakdown as the headless result (samples are never included on
-    /// UI syncs). It is `nil` when there is nothing attributable to report:
+    /// both directions. On a successful or partial band / Apple Health /
+    /// Health Connect UI sync, ``RollaSyncResult/syncedData`` carries the same
+    /// per-stream summary breakdown as the headless result (samples are never
+    /// included on UI syncs). It is `nil` when there is nothing attributable to report:
     /// failure and skipped events, Garmin/Oura content-only refreshes, syncs
     /// that recorded no data, and syncs that overlapped another sync
     /// (concurrent UI syncs or a concurrent headless sync) — never wrong or
     /// double-reported data.
+    ///
+    /// ``RollaSyncResult/streamResults`` and the outcome follow the same rules
+    /// as the headless result, so a UI sync where a stream failed is reported
+    /// as `.partial` while new data still reached the server (or `.failure`
+    /// when none did), even while the SDK UI itself shows the sync as complete.
     ///
     /// - Parameters:
     ///   - rolla: The Rolla instance delivering the event.
@@ -181,6 +187,39 @@ public protocol RollaDelegate: AnyObject {
     ///   - rolla: The Rolla instance delivering the event.
     ///   - update: The sparse map of changed fields.
     func rollaDidUpdateProfile(_ rolla: Rolla, update: RollaProfileUpdated)
+
+    /// Called with the user's access status when the SDK first loads it and on
+    /// every change after, in order — a lock from a `403 access_required`
+    /// refusal, the access end date or a status refresh, and an unlock after a
+    /// redeemed code or a partner-side restore. The SDK never reports an
+    /// unlock without a backend answer.
+    ///
+    /// A lock that lands while a workout is recording in the SDK UI is
+    /// delivered once the workout is finished or discarded, so the user can
+    /// complete it (a newer lock replaces the held one); an unlock is never
+    /// held. Delivered for the engine's lifetime, UI shown or not, and
+    /// presenter-first like every host event: while the SDK UI is shown, to
+    /// the instance presenting it; otherwise to the instance that most
+    /// recently called the SDK — so set the delegate on every instance that calls the SDK,
+    /// or keep one instance: a status that reaches an instance without a
+    /// delegate is not repeated. A headless
+    /// ``Rolla/syncHealthData(includeSamples:completion:)`` that learns of a
+    /// lock answers `skipped` with `accessRequired` — or `partial`, with the
+    /// lock as its error, when data landed before the backend stated it
+    /// mid-sync — and reports the lock here, possibly after its completion
+    /// handler.
+    ///
+    /// A host that gates its own screens shows or lifts its lock from
+    /// ``RollaAccessStatus/isLocked``; a host that presents the SDK can leave
+    /// the lock to it — the SDK's own lock screen handles code entry, the help
+    /// link and logout while locked. Partners whose gate is off hear one
+    /// status with ``RollaAccessStatus/gateEnabled`` `false` per SDK session
+    /// (each engine start or user switch), and again only when it changes.
+    ///
+    /// - Parameters:
+    ///   - rolla: The Rolla instance delivering the event.
+    ///   - status: The user's access status.
+    func rollaDidChangeAccess(_ rolla: Rolla, status: RollaAccessStatus)
 }
 
 public extension RollaDelegate {
@@ -200,4 +239,5 @@ public extension RollaDelegate {
     func rollaDidChangePrimarySource(_ rolla: Rolla, change: RollaPrimarySourceChanged) {}
     func rollaDidChangeGoals(_ rolla: Rolla, change: RollaGoalsChanged) {}
     func rollaDidUpdateProfile(_ rolla: Rolla, update: RollaProfileUpdated) {}
+    func rollaDidChangeAccess(_ rolla: Rolla, status: RollaAccessStatus) {}
 }

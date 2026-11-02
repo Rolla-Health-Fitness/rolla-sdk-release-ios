@@ -25,7 +25,7 @@ public final class Rolla {
                 return
             }
 
-            guard viewController.viewIfLoaded?.window != nil else {
+            guard Self.canPresent(from: viewController) else {
                 self.delegate?.rollaDidFailWithError(self, error: .invalidPresentationContext)
                 return
             }
@@ -37,6 +37,15 @@ public final class Rolla {
 
                 switch result {
                 case .success(let vc):
+                    // The configure round-trip can outlive the host's
+                    // presentation context; a present UIKit refuses (detached,
+                    // or already presenting) would strand the slot.
+                    guard Self.canPresent(from: viewController) else {
+                        self.cleanup()
+                        self.delegate?.rollaDidFailWithError(self, error: .invalidPresentationContext)
+                        return
+                    }
+                    self.engineManager.markPresentationLaunched()
                     vc.setupPresentation(transition: transition)
                     viewController.present(vc, animated: true)
 
@@ -118,8 +127,10 @@ public final class Rolla {
             // callbacks. Another Rolla instance may be presenting right now, and
             // those callbacks belong to it; show() wires them when this instance
             // presents. The host-EVENT callbacks are different: they are
-            // engine-scoped, not presentation-scoped, so a headless warm-up DOES
-            // wire them — events must flow without the SDK UI ever opening.
+            // engine-scoped, not presentation-scoped, so a headless warm-up
+            // wires them when nothing is presented — events must flow without
+            // the SDK UI ever opening. While another instance presents the UI
+            // they stay with it (see wireHostEventCallbacks).
             self.wireHostEventCallbacks()
             self.engineManager.ensureConfigured(with: self.configuration) { result in
                 completion?(result)
@@ -147,7 +158,8 @@ public final class Rolla {
     public func getBandBatteryLevel(completion: @escaping (Result<RollaBatteryResult, RollaError>) -> Void) {
         DispatchQueue.main.async {
             // Headless read: don't wire presentation callbacks (see warmUpEngine).
-            // Host-event callbacks ARE wired — they're engine-scoped.
+            // Host-event callbacks are engine-scoped and wired here only when
+            // nothing is presented; a presenter keeps them.
             self.wireHostEventCallbacks()
             //
             // Capture `self` STRONGLY through the configure round-trip. This is a
@@ -199,7 +211,8 @@ public final class Rolla {
     public func getPairedBandInfo(completion: @escaping (Result<RollaPairedBandResult, RollaError>) -> Void) {
         DispatchQueue.main.async {
             // Headless query: don't wire presentation callbacks (see warmUpEngine).
-            // Host-event callbacks ARE wired — they're engine-scoped.
+            // Host-event callbacks are engine-scoped and wired here only when
+            // nothing is presented; a presenter keeps them.
             self.wireHostEventCallbacks()
             //
             // Capture `self` STRONGLY through the configure round-trip — a
@@ -234,11 +247,13 @@ public final class Rolla {
     /// ``RollaDelegate/rollaDidCompleteHealthDataSync(_:result:)`` once a sync
     /// reaches a terminal outcome.
     ///
-    /// On success, ``RollaSyncResult/syncedData`` describes what was uploaded. A
-    /// per-stream summary is always included; pass `includeSamples` `true` to
-    /// also receive the raw sample arrays (``RollaSyncedHealthData/samples``).
-    /// Samples are heavier — a band sync can be thousands of points — so they
-    /// default to off.
+    /// On a successful or partial sync, ``RollaSyncResult/syncedData``
+    /// describes what was uploaded (the property documents the cases where it
+    /// is nil, such as a sync that overlapped another one). A per-stream
+    /// summary is always included in it;
+    /// pass `includeSamples` `true` to also receive the raw sample arrays
+    /// (``RollaSyncedHealthData/samples``). Samples are heavier — a band sync
+    /// can be thousands of points — so they default to off.
     ///
     /// - Parameters:
     ///   - includeSamples: When `true`, also return the raw per-stream samples.
@@ -250,7 +265,8 @@ public final class Rolla {
     ) {
         DispatchQueue.main.async {
             // Headless sync: don't wire presentation callbacks (see warmUpEngine).
-            // Host-event callbacks ARE wired — they're engine-scoped.
+            // Host-event callbacks are engine-scoped and wired here only when
+            // nothing is presented; a presenter keeps them.
             self.wireHostEventCallbacks()
             //
             // Capture `self` STRONGLY through the configure round-trip — same
@@ -313,7 +329,7 @@ public final class Rolla {
                 return
             }
 
-            guard viewController.viewIfLoaded?.window != nil else {
+            guard Self.canPresent(from: viewController) else {
                 self.delegate?.rollaDidFailWithError(self, error: .invalidPresentationContext)
                 completion(.uiUnavailable)
                 return
@@ -341,6 +357,13 @@ public final class Rolla {
             self.prepareAndShow { result in
                 switch result {
                 case .success(let vc):
+                    guard Self.canPresent(from: viewController) else {
+                        self.cleanup()
+                        self.delegate?.rollaDidFailWithError(self, error: .invalidPresentationContext)
+                        completion(.uiUnavailable)
+                        return
+                    }
+                    self.engineManager.markPresentationLaunched()
                     vc.setupPresentation(transition: transition)
                     viewController.present(vc, animated: true)
                     // Invoked only now, after configure's `initialize` has
@@ -380,15 +403,23 @@ public final class Rolla {
         engineManager.setPresenting(true)
 
         // Engine-scoped host events must flow regardless of presentation —
-        // same discipline as the headless APIs (see warmUpEngine).
-        wireHostEventCallbacks()
+        // same discipline as the headless APIs (see warmUpEngine). They and
+        // the token callbacks are claimed now rather than in setupCallbacks()
+        // after the open: this instance holds the presenting slot, so no
+        // headless call from another instance rewires them from here on, and
+        // an event, a rotation or a failed refresh during the
+        // configure/navigate round-trip must reach ITS delegate — not the
+        // instance that wired them last, which may be a throwaway warm-up
+        // instance with none (a rotated refresh token is single-use, so a
+        // delivery to nobody loses it for good).
+        wireHostEventCallbacks(presenting: true)
 
         // `self` is captured strongly through the round-trips — same
         // reasoning as getBandBatteryLevel(completion:).
         engineManager.ensureConfigured(with: configuration) { configureResult in
             switch configureResult {
             case .failure(let error):
-                self.engineManager.setPresenting(false)
+                self.engineManager.releasePresentation()
                 self.delegate?.rollaDidFailWithError(self, error: error)
                 completion(.unknownError)
 
@@ -397,13 +428,13 @@ public final class Rolla {
                 // queues the navigation until its home widget settles.
                 self.engineManager.openScreen(screen) { status in
                     guard status == .opened else {
-                        self.engineManager.setPresenting(false)
+                        self.engineManager.releasePresentation()
                         completion(status)
                         return
                     }
 
                     guard let engine = self.engineManager.engine else {
-                        self.engineManager.setPresenting(false)
+                        self.engineManager.releasePresentation()
                         self.delegate?.rollaDidFailWithError(self, error: .engineFailedToStart)
                         completion(.unknownError)
                         return
@@ -411,11 +442,11 @@ public final class Rolla {
 
                     // The async round-trips above can outlive the host's
                     // presentation context — re-validate before presenting,
-                    // like show() does at call time. Presenting from a
-                    // detached view controller no-ops silently and would
-                    // strand isPresenting forever.
-                    guard viewController.viewIfLoaded?.window != nil else {
-                        self.engineManager.setPresenting(false)
+                    // like show() does at call time. A present UIKit refuses
+                    // (detached, or already presenting) no-ops silently and
+                    // would strand the slot.
+                    guard Self.canPresent(from: viewController) else {
+                        self.engineManager.releasePresentation()
                         self.delegate?.rollaDidFailWithError(self, error: .invalidPresentationContext)
                         completion(.uiUnavailable)
                         return
@@ -423,6 +454,7 @@ public final class Rolla {
 
                     self.setupCallbacks()
                     let vc = self.makePresentableViewController(engine: engine)
+                    self.engineManager.markPresentationLaunched()
                     vc.setupPresentation(transition: transition)
                     viewController.present(vc, animated: true)
                     completion(.opened)
@@ -489,7 +521,14 @@ public final class Rolla {
     private func makePresentableViewController(engine: FlutterEngine) -> RollaFlutterViewController {
         let vc = RollaFlutterViewController(engine: engine, nibName: nil, bundle: nil)
         vc.onDismiss = { [weak self] reason in
-            guard let self else { return }
+            // The presenter can be gone by now (destroyEngine() under a
+            // presented UI releases the closures that kept it alive); the
+            // slot is still released exactly as cleanup() would, or every
+            // later caller would find the UI "presented" and wire nothing.
+            guard let self else {
+                RollaEngineManager.shared.releasePresentation()
+                return
+            }
             let finalReason = self.pendingCloseReason ?? reason
             self.cleanup()
             self.delegate?.rollaDidClose(self, reason: finalReason)
@@ -498,14 +537,29 @@ public final class Rolla {
         return vc
     }
 
-    /// Wire the host-event closures to THIS instance's delegate for the
-    /// engine's lifetime. Unlike the presentation callbacks (wired in
-    /// ``setupCallbacks()``, cleared in ``cleanup()`` on dismiss), events keep
-    /// flowing after the SDK UI closes — a late `uploaded` activity phase must
-    /// still reach the host, and a host that only ever runs headless calls
-    /// still gets events. Cleared only by ``destroyEngine()`` or when another
-    /// Rolla instance wires itself (last writer wins, matching the
-    /// presentation-callback semantics).
+    /// Wire the engine-scoped closures — the twelve host events and the token
+    /// pair — to THIS instance's delegate. Unlike the presentation callbacks
+    /// (wired in ``setupCallbacks()``, cleared in ``cleanup()`` on dismiss),
+    /// all fourteen survive a dismiss and are cleared only by
+    /// ``destroyEngine()``: a late `uploaded` activity phase must still reach
+    /// the host, a host that only ever runs headless calls still gets events,
+    /// and a headless call can rotate or lose the session with no UI shown.
+    ///
+    /// Ownership is presenter-first. While the SDK UI is presented, or being
+    /// opened, the closures belong to the presenting instance, and a headless call from
+    /// another instance — typically a throwaway with no delegate — wires
+    /// nothing, so it cannot swallow the open UI's events. Should that
+    /// reservation end without presenting, the caller turned away takes the
+    /// closures then (``RollaEngineManager/releasePresentation()``). A refresh token is
+    /// single-use, so a rotation delivered to an instance without a delegate
+    /// would leave the host holding a dead pair. With nothing presented the
+    /// most recent caller takes all fourteen. ``setupCallbacks()`` and the
+    /// warm ``openScreen(_:from:transition:completion:)`` path pass
+    /// `presenting: true`; every headless entry point keeps the default.
+    ///
+    /// - Parameter presenting: `true` when this instance is presenting (or
+    ///   about to present) the SDK UI and so takes the closures even though
+    ///   ``RollaEngineManager/isPresenting`` is already set.
     ///
     /// `self` is captured strongly on purpose: hosts often create a Rolla
     /// instance per call and drop it; a weak capture would silently end event
@@ -513,7 +567,21 @@ public final class Rolla {
     /// singleton and `Rolla` holds no strong reference back to it, so this is
     /// a cycle-free lifetime extension until destroy/rewire. The delegate
     /// property itself stays weak — the host controls its listener's lifetime.
-    private func wireHostEventCallbacks() {
+    private func wireHostEventCallbacks(presenting: Bool = false) {
+        guard presenting || !engineManager.isPresenting else {
+            // Turned away while another instance holds the presentation slot.
+            // Only a reservation still in flight can end without presenting,
+            // so only then is this caller recorded as the hand-back that runs
+            // if it does; once the UI is on screen the presenter keeps the
+            // closures through the dismiss and nothing is retained for
+            // nothing. `self` is captured strongly for the same reason the
+            // closures capture it.
+            if !engineManager.presentationLaunched {
+                engineManager.deferredHostEventWiring = { self.wireHostEventCallbacks() }
+            }
+            return
+        }
+
         engineManager.onActivityCompleted = { activity in
             self.delegate?.rollaDidCompleteActivity(self, activity: activity)
         }
@@ -557,10 +625,32 @@ public final class Rolla {
         engineManager.onProfileUpdated = { update in
             self.delegate?.rollaDidUpdateProfile(self, update: update)
         }
+
+        engineManager.onAccessChanged = { status in
+            self.delegate?.rollaDidChangeAccess(self, status: status)
+        }
+
+        // A refresh token is single-use, so a rotation delivered to an
+        // instance without a delegate leaves the host holding a dead pair —
+        // the guard above keeps a presenter's pair from moving.
+        // `onTokenExpired` answers whether a delegate was there to receive
+        // the request; without one the Dart side fails fast instead of
+        // waiting for an `updateToken` push that can never come.
+        engineManager.onTokenRefreshed = { token, refreshToken, expiresIn in
+            self.delegate?.rollaDidRefreshToken(
+                self, token: token, refreshToken: refreshToken, expiresIn: expiresIn
+            )
+        }
+
+        engineManager.onTokenExpired = {
+            guard let delegate = self.delegate else { return false }
+            delegate.rollaDidRequestTokenRefresh(self)
+            return true
+        }
     }
 
     private func setupCallbacks() {
-        wireHostEventCallbacks()
+        wireHostEventCallbacks(presenting: true)
 
         engineManager.onClose = { [weak self] reason in
             guard let self else { return }
@@ -572,25 +662,21 @@ public final class Rolla {
             guard let self else { return }
             self.delegate?.rollaDidFailWithError(self, error: .flutterError(code: code, message: message))
         }
+    }
 
-        engineManager.onTokenRefreshed = { [weak self] token, refreshToken, expiresIn in
-            guard let self else { return }
-            self.delegate?.rollaDidRefreshToken(self, token: token, refreshToken: refreshToken, expiresIn: expiresIn)
-        }
-
-        engineManager.onTokenExpired = { [weak self] in
-            guard let self else { return }
-            self.delegate?.rollaDidRequestTokenRefresh(self)
-        }
+    /// Whether UIKit would actually present from [viewController]: it must be
+    /// on screen and not already presenting something else — either way
+    /// `present(_:animated:)` is a silent no-op that would strand the
+    /// presentation slot.
+    private static func canPresent(from viewController: UIViewController) -> Bool {
+        viewController.viewIfLoaded?.window != nil && viewController.presentedViewController == nil
     }
 
     private func cleanup() {
         pendingCloseReason = nil
         flutterViewController = nil
-        engineManager.setPresenting(false)
-        engineManager.onClose = nil
-        engineManager.onError = nil
-        engineManager.onTokenRefreshed = nil
-        engineManager.onTokenExpired = nil
+        // Whether the UI ever launched, and so whether a turned-away caller
+        // takes the closures now, is the engine manager's call.
+        engineManager.releasePresentation()
     }
 }

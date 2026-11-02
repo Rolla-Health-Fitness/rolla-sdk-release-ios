@@ -42,18 +42,42 @@ final class RollaEngineManager {
     // Count of in-flight configure round-trips that CHANGED the anchor.
     // While one is running, the Dart side may still be tearing down the
     // previous session, and a late onTokenRefreshed from that session must
-    // not seed the register under the new anchor — it would be replayed to
-    // the new user on the next configure. Seeds are discarded while > 0.
+    // not seed the register under the new anchor — it would be replayed on
+    // the next configure. Seeding is dropped while > 0; whether the event
+    // reaches the host is decided by `userChangingConfigures` instead.
     private var anchorChangingConfigures = 0
+
+    // Who the current session belongs to: the host's `userId`, else the
+    // token's JWT `sub` — the key the Dart side uses to tell a same-user
+    // re-initialize (a seamless resume) from a user switch. The anchor above
+    // tracks the token STRING, which also moves on a same-user reconfigure
+    // with a rotated pair; that must reset the register but must not silence
+    // the host forward.
+    private var sessionUserKey: String?
+
+    // Count of in-flight configure round-trips that CHANGED the user. A late
+    // onTokenRefreshed from the session being replaced must not reach the
+    // host callback, which already belongs to the new user. Kept apart from
+    // the anchor count on purpose: a rotation landing during a same-user
+    // reconfigure is one the host must hear about — its stored refresh token
+    // is consumed either way — and the first configure of an engine has no
+    // previous session whose refresh could race it, so neither case gates.
+    private var userChangingConfigures = 0
 
     var onClose: ((String?) -> Void)?
     var onError: ((String, String) -> Void)?
-    var onTokenRefreshed: ((String, String?, TimeInterval?) -> Void)?
-    var onTokenExpired: (() -> Void)?
 
     // Host-event closures. Unlike the presentation callbacks above (wired on
     // show, cleared on dismiss), these are wired for the engine's lifetime by
-    // Rolla.wireHostEventCallbacks() and cleared only in destroy().
+    // Rolla.wireHostEventCallbacks() and cleared only in destroy(). The token
+    // pair belongs here: a headless call can rotate or lose the session, so
+    // delivery must not depend on the SDK UI being presented. All of them are
+    // presenter-first: while the UI is presented they belong to the presenting
+    // Rolla instance and a headless call never takes them from it; otherwise
+    // they go to the instance that most recently called the SDK.
+    // `onTokenExpired` returns whether a host delegate received the request.
+    var onTokenRefreshed: ((String, String?, TimeInterval?) -> Void)?
+    var onTokenExpired: (() -> Bool)?
     var onActivityCompleted: ((RollaCompletedActivity) -> Void)?
     var onActivityStarted: ((RollaStartedActivity) -> Void)?
     var onActivityRemoved: ((RollaRemovedActivity) -> Void)?
@@ -65,6 +89,50 @@ final class RollaEngineManager {
     var onPrimarySourceChanged: ((RollaPrimarySourceChanged) -> Void)?
     var onGoalsChanged: ((RollaGoalsChanged) -> Void)?
     var onProfileUpdated: ((RollaProfileUpdated) -> Void)?
+    var onAccessChanged: ((RollaAccessStatus) -> Void)?
+
+    // A headless caller the presenter-first guard turned away while the
+    // presentation slot was held. Run when that reservation ends without
+    // presenting, so the most recent caller still ends up with the closures;
+    // dropped when the slot holder actually presents (it keeps them, through
+    // the dismiss as well) and in destroy().
+    var deferredHostEventWiring: (() -> Void)?
+
+    func runDeferredHostEventWiring() {
+        let wiring = deferredHostEventWiring
+        deferredHostEventWiring = nil
+        wiring?()
+    }
+
+    // Whether the SDK UI actually launched for the current presentation slot
+    // (a view controller was presented), as opposed to the slot merely being
+    // reserved for an open still in flight. Reset with the slot, and by
+    // destroy(), which can run with the UI still up.
+    private(set) var presentationLaunched = false
+
+    // Reservation → real presentation. A pending hand-back is dropped: the
+    // presenter keeps the closures through the dismiss.
+    func markPresentationLaunched() {
+        presentationLaunched = true
+        deferredHostEventWiring = nil
+    }
+
+    // The one way the presentation slot is released, whatever ended it. After
+    // a real presentation the presenter keeps the closures; after a
+    // reservation that never presented, a headless caller turned away
+    // meanwhile takes them now. The presentation callbacks go with the slot.
+    func releasePresentation() {
+        let launched = presentationLaunched
+        presentationLaunched = false
+        isPresenting = false
+        onClose = nil
+        onError = nil
+        if launched {
+            deferredHostEventWiring = nil
+        } else {
+            runDeferredHostEventWiring()
+        }
+    }
 
     private init() {}
 
@@ -126,11 +194,11 @@ final class RollaEngineManager {
             let refreshToken = args?["refreshToken"] as? String
             let expiresIn = args?["expiresIn"] as? Int
             let expiresInInterval: TimeInterval? = expiresIn.map { TimeInterval($0) }
-            // Never seed while an anchor-changing configure is in flight:
-            // this event may belong to the session being replaced (its
-            // refresh raced the switch) and must not be replayed to the new
-            // user.
-            if !token.isEmpty && anchorChangingConfigures == 0 {
+            // Never seed while an anchor-changing configure is in flight: the
+            // event may belong to the credential lineage being replaced (its
+            // refresh raced the configure), and seeding would replay it on
+            // the next configure.
+            if anchorChangingConfigures == 0, !token.isEmpty {
                 latestKnownTokens = LatestKnownTokens(
                     token: token,
                     refreshToken: refreshToken,
@@ -138,12 +206,21 @@ final class RollaEngineManager {
                     seededAt: Date()
                 )
             }
-            onTokenRefreshed?(token, refreshToken, expiresInInterval)
+            // Forward unless a user-changing configure is in flight: then the
+            // event may belong to the user being replaced, and the delegate
+            // already belongs to the new one. A same-user reconfigure keeps
+            // forwarding — this rotation consumed the host's stored refresh
+            // token whichever token it just configured with.
+            if userChangingConfigures == 0 {
+                onTokenRefreshed?(token, refreshToken, expiresInInterval)
+            }
             result(nil)
 
         case "onTokenExpired":
-            onTokenExpired?()
-            result(nil)
+            // Answer whether a host delegate heard the request. Dart skips its
+            // updateToken wait when nobody did — no push can ever arrive.
+            let handled = onTokenExpired?() ?? false
+            result(["handled": handled])
 
         case "onActivityCompleted":
             onActivityCompleted?(RollaCompletedActivity.from(call.arguments))
@@ -189,6 +266,10 @@ final class RollaEngineManager {
             onProfileUpdated?(RollaProfileUpdated.from(call.arguments))
             result(nil)
 
+        case "onAccessChanged":
+            onAccessChanged?(RollaAccessStatus.from(call.arguments))
+            result(nil)
+
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -212,6 +293,15 @@ final class RollaEngineManager {
             anchorChangingConfigures += 1
         }
 
+        // A user change needs a previous session to give way: the first
+        // configure of an engine never gates the host forward.
+        let userKey = Self.userKey(for: config)
+        let userChanged = sessionUserKey != nil && sessionUserKey != userKey
+        sessionUserKey = userKey
+        if userChanged {
+            userChangingConfigures += 1
+        }
+
         var args: [String: Any] = [
             "token": latest?.token ?? config.token,
             "partnerId": config.partnerId,
@@ -225,6 +315,10 @@ final class RollaEngineManager {
 
         if let userId = config.userId {
             args["userId"] = userId
+        }
+
+        if let oauthCallbackScheme = config.oauthCallbackScheme {
+            args["oauthCallbackScheme"] = oauthCallbackScheme
         }
 
         if let latest = latest {
@@ -271,12 +365,17 @@ final class RollaEngineManager {
         }
 
         channel.invokeMethod("initialize", arguments: args) { [weak self] response in
-            // Settle the anchor change synchronously (the result callback
-            // arrives on the platform thread) — floored at zero, since
-            // destroy() resets the counter and a late callback from a
-            // destroyed engine must not push it negative.
-            if anchorChanged, let self = self {
-                self.anchorChangingConfigures = max(self.anchorChangingConfigures - 1, 0)
+            // Settle the anchor and user changes synchronously (the result
+            // callback arrives on the platform thread) — floored at zero,
+            // since destroy() resets the counters and a late callback from a
+            // destroyed engine must not push them negative.
+            if let self = self {
+                if anchorChanged {
+                    self.anchorChangingConfigures = max(self.anchorChangingConfigures - 1, 0)
+                }
+                if userChanged {
+                    self.userChangingConfigures = max(self.userChangingConfigures - 1, 0)
+                }
             }
             DispatchQueue.main.async {
                 if let error = response as? FlutterError {
@@ -465,6 +564,36 @@ final class RollaEngineManager {
         }
     }
 
+    /// The identity the Dart side files a session under: the host-supplied
+    /// `userId`, else the token's JWT `sub` claim. Falls back to the token
+    /// itself when neither is available, which treats every new token as a
+    /// new user — the conservative reading.
+    private static func userKey(for config: RollaConfiguration) -> String {
+        if let userId = config.userId, !userId.isEmpty {
+            return userId
+        }
+        return jwtSubject(config.token) ?? config.token
+    }
+
+    /// The `sub` claim of a JWT's payload; nil when `token` is not a
+    /// decodable JWT or carries no `sub`.
+    private static func jwtSubject(_ token: String) -> String? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while payload.count % 4 != 0 {
+            payload += "="
+        }
+        guard let data = Data(base64Encoded: payload),
+              let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sub = claims["sub"] as? String, !sub.isEmpty else {
+            return nil
+        }
+        return sub
+    }
+
     func clearSession(completion: @escaping (Result<Void, RollaError>) -> Void) {
         guard let channel = methodChannel else {
             completion(.failure(.engineFailedToStart))
@@ -478,7 +607,10 @@ final class RollaEngineManager {
                 } else {
                     // The session's credentials are gone — forget the register
                     // so the next configure sends its configuration's own
-                    // tokens.
+                    // tokens. `sessionUserKey` stays: the next configure may
+                    // still race a refresh the old session had in flight, and
+                    // the user comparison is what decides whether that
+                    // rotation may reach the host.
                     self?.latestKnownTokens = nil
                     self?.sessionAnchorToken = nil
                     completion(.success(()))
@@ -494,6 +626,8 @@ final class RollaEngineManager {
         latestKnownTokens = nil
         sessionAnchorToken = nil
         anchorChangingConfigures = 0
+        sessionUserKey = nil
+        userChangingConfigures = 0
         onClose = nil
         onError = nil
         onTokenRefreshed = nil
@@ -509,6 +643,9 @@ final class RollaEngineManager {
         onPrimarySourceChanged = nil
         onGoalsChanged = nil
         onProfileUpdated = nil
+        onAccessChanged = nil
+        deferredHostEventWiring = nil
+        presentationLaunched = false
         engine?.destroyContext()
         engine = nil
         isReady = false

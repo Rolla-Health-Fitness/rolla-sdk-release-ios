@@ -2,7 +2,7 @@
 
 iOS distribution repository for the Rolla Flutter SDK. Contains artifacts for integrating Rolla into native iOS apps.
 
-**Latest version:** `0.1.15`
+**Latest version:** `0.2.0`
 
 > **Package Manager Support:** CocoaPods is the only supported package manager at this time. Swift Package Manager (SPM) will be supported soon.
 
@@ -13,14 +13,14 @@ iOS distribution repository for the Rolla Flutter SDK. Contains artifacts for in
 Add the Rolla SDK specs repository and dependency to your `Podfile`:
 
 ```ruby
-platform :ios, '14.0'
+platform :ios, '15.0'
 
 source 'https://github.com/Rolla-Health-Fitness/rolla-sdk-release-ios.git'
 source 'https://cdn.cocoapods.org/'
 
 target 'YourApp' do
   use_frameworks!
-  pod 'RollaSDK', '~> 0.1.15'
+  pod 'RollaSDK', '~> 0.2.0'
 end
 ```
 

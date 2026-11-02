@@ -82,6 +82,10 @@ final class AppDependencies {
         RollaPermissionsHandler()
     }()
 
+    lazy var groupInstallationHandler: GroupInstallationHandler = {
+        GroupInstallationHandler()
+    }()
+
     lazy var phonePedometerHandler: PhonePedometerHandler = {
         PhonePedometerHandler(flutterApi: phonePedometerFlutterApi)
     }()
@@ -106,7 +110,7 @@ final class AppDependencies {
 
     /// Handles iOS Live Activities for workout tracking (iOS 16.1+)
     /// This is registered automatically - host apps don't need any AppCoordinator code
-    /// Type is Any? to avoid availability checks at compile time (deployment target is iOS 14.0)
+    /// Type is Any? to avoid availability checks at compile time (deployment target is iOS 15.0)
     lazy var liveWorkoutBridge: Any? = {
         if #available(iOS 16.1, *) {
             return LiveWorkoutBridge(binaryMessenger: binaryMessenger)
@@ -211,6 +215,11 @@ final class AppDependencies {
         RollaPermissionsHostApiSetup.setUp(
             binaryMessenger: binaryMessenger,
             api: rollaPermissionsHandler
+        )
+
+        GroupInstallationHostApiSetup.setUp(
+            binaryMessenger: binaryMessenger,
+            api: groupInstallationHandler
         )
 
         PhonePedometerHostApiSetup.setUp(
